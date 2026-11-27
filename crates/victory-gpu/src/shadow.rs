@@ -1504,9 +1504,43 @@ fn spin(there: impl Fn() -> bool) {
     }
 }
 
-/// How many threads are kept for [`wide`].
+/// How many threads are kept for [`wide`]. `VICTORY_WIDE_THREADS=1..16`
+/// overrides the default; unset or invalid values retain the existing policy.
+/// Read once because the worker pool itself is initialized only once.
 fn wide_threads() -> usize {
-    std::thread::available_parallelism().map_or(4, |n| n.get() / 4).clamp(2, 6)
+    static SETTING: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    wide_thread_count(
+        SETTING.get_or_init(|| std::env::var("VICTORY_WIDE_THREADS").ok()).as_deref(),
+        std::thread::available_parallelism().ok().map(|n| n.get()),
+    )
+}
+
+fn wide_thread_count(setting: Option<&str>, logical: Option<usize>) -> usize {
+    let default = logical.map_or(4, |n| n / 4).clamp(2, 6);
+    setting.and_then(|s| s.trim().parse::<usize>().ok()).filter(|n| (1..=16).contains(n)).unwrap_or(default)
+}
+
+#[cfg(test)]
+mod wide_thread_count_tests {
+    use super::wide_thread_count;
+
+    #[test]
+    fn default_matches_original_policy() {
+        assert_eq!(wide_thread_count(None, None), 4);
+        for (logical, expected) in [(1, 2), (12, 3), (24, 6), (128, 6)] {
+            assert_eq!(wide_thread_count(None, Some(logical)), expected);
+        }
+    }
+
+    #[test]
+    fn accepts_only_bounded_overrides() {
+        for (setting, expected) in [("1", 1), (" 5 ", 5), ("16", 16)] {
+            assert_eq!(wide_thread_count(Some(setting), Some(12)), expected);
+        }
+        for setting in ["", "0", "17", "-1", "invalid", "999999999999999999999999999999"] {
+            assert_eq!(wide_thread_count(Some(setting), Some(12)), 3);
+        }
+    }
 }
 
 fn workers() -> &'static Workers {
